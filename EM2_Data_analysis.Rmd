@@ -1,0 +1,1921 @@
+---
+title: "EM2_Data_Analysis"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# EM2 Data Analysis
+
+## Packages and working directory
+
+```{r}
+library(readr)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(viridis)  # for colorblind-friendly palette
+library(afex)
+library(emmeans)
+library(brms)
+library(rstan)
+library(zoo)
+library(performance)
+library(partR2)
+library(effectsize)
+
+```
+
+```{r}
+setwd("C:/Users/Safir/OneDrive/KU/03Semester/EM_2/EM2_Experiment_pschyopy")
+```
+
+## Cleaning data
+
+Cleaning functions (removing backwards motion, replacing unsuccessful trials with NaN, clean participant trials)
+
+```{r}
+#Removing any backwards motion:
+clean_after_max <- function(df) {
+  df %>%
+    arrange(trial, time) %>%
+    group_by(trial) %>%
+    group_modify(~ {
+      if (!"x" %in% colnames(.x) || all(is.na(.x$x))) {
+        return(.x) # return as is if x missing or all NA
+      } else {
+        slice_head(.x, n = which.max(.x$x))
+      }
+    }) %>%
+    ungroup()
+}
+
+# Replace trajectory data with NaN for unsuccessful trials
+mark_unsuccessful_trials <- function(df, unsuccessful_trials) {
+  df %>%
+    mutate(
+      x = if_else(trial %in% unsuccessful_trials, NaN, x),
+      y = if_else(trial %in% unsuccessful_trials, NaN, y),
+      distance = if_else(trial %in% unsuccessful_trials, NaN, distance)
+    )
+}
+
+# Clean a single participant's data
+clean_participant <- function(df, unsuccessful_trials_training = c(), unsuccessful_trials_test = c()) {
+  
+  training_df <- df %>%
+    filter(phase == "training") %>%
+    clean_after_max() %>%
+    mark_unsuccessful_trials(unsuccessful_trials_training)
+  
+  test_df <- df %>%
+    filter(phase == "test") %>%
+    clean_after_max() %>%
+    mark_unsuccessful_trials(unsuccessful_trials_test)
+  
+  bind_rows(training_df, test_df)
+}
+```
+
+Unsucessfull trials
+
+```{r}
+# Example: list of unsuccessful trials per participant
+unsuccessful_trials_list <- list(
+  p001 = list(training = c(1), test = c()),
+  p002 = list(training = c(2), test = c()),
+  p004 = list(training = c(), test = c()),
+  p005 = list(training = c(), test = c(2, 3)),
+  p006 = list(training = c(), test = c()),
+  p007 = list(training = c(), test = c(12)),
+  p008 = list(training = c(), test = c()),
+  p009 = list(training = c(), test = c()),
+  p010 = list(training = c(), test = c(7, 8, 14)),
+  p012 = list(training = c(1), test = c()),
+  p013 = list(training = c(), test = c()),
+  p014 = list(training = c(12), test = c()),
+  p015 = list(training = c(), test = c()),
+  p017 = list(training = c(4,24), test = c()),
+  p018 = list(training = c(1,2,21), test = c()),
+  p019 = list(training = c(1,2,3,4,5), test = c()),
+  p020 = list(training = c(1, 2, 3, 4), test = c()),
+  p021 = list(training = c(), test = c()),
+  p022 = list(training = c(), test = c()),
+  p024 = list(training = c(), test = c()),
+  p025 = list(training = c(1), test = c())
+)
+```
+
+Adding self-report modal reliance
+
+```{r}
+participant_reliance <- c(
+  p001 = "P",
+  p002 = "P",
+  p004 = "A",
+  p005 = "A",
+  p006 = "A, P",
+  p007 = "A",
+  p008 = "A",
+  p009 = "A",
+  p010 = "A",
+  p012 = "A",
+  p013 = "A",
+  p014 = "P",
+  p015 = "A, P",
+  p017 = "A",
+  p018 = "A",
+  p019 = "P",
+  p020 = "P",
+  p021 = "A",
+  p022 = "A",
+  p024 = "A",
+  p025 = "P"
+)
+```
+
+Test group/block specification
+
+```{r}
+# Participant block assignment
+participant_blocks <- c(
+  p001 = 1, p009 = 1, p010 = 1, p012 = 1, p014 = 1, p018 = 1, p020 = 1, p021 = 1, p024 = 1, p025 = 1,
+  p002 = 2, p004 = 2, p007 = 2, p015 = 2, p019 = 2, p022 = 2,
+  p005 = 3, p006 = 3, p008 = 3, p013 = 3, p017 = 3
+)
+```
+
+### Load and clean data
+
+```{r}
+# Specify folder and unsuccessful trials
+data_folder <- "data/data_backup"
+
+# Get list of CSV files
+csv_files <- list.files(data_folder, pattern = "\\.csv$", full.names = TRUE)
+
+alldata <-  map_dfr(csv_files, function(file) {
+  # Extract participant ID from filename
+  participant_num <- str_extract(basename(file), "\\d+")
+  participant_id <- paste0("p", str_pad(participant_num, 3, pad = "0"))
+  
+  df <- read_csv(file)
+  
+  df <- df %>% rename_with(~tolower(.x))
+    
+  df <- df %>% mutate(distance = sqrt((x - 350)^2 + y^2))
+
+  # Filter for participant's block
+  block_num <- participant_blocks[participant_id]
+  df <- df %>% filter(block == block_num)
+  
+  unsuccessful_trials_training <-   unsuccessful_trials_list[[participant_id]]$training
+  unsuccessful_trials_test <- unsuccessful_trials_list[[participant_id]]$test
+  
+  # Clean participant's data
+  df <- clean_participant(df, unsuccessful_trials_training, unsuccessful_trials_test)
+  
+  df <- df %>%
+    mutate(reliance = participant_reliance[participant_id])
+  
+  
+  df
+
+})
+```
+
+Save as a CSV file
+
+```{r}
+write_csv(alldata, "alldata_cleaned.csv")
+```
+
+## Adding stuff
+
+Load cleaned data
+
+```{r}
+#loading data from the cleaned data file
+alldataloaded <- read_csv("alldata_cleaned.csv", show_col_types = FALSE)
+```
+
+```{r}
+#distance to goal
+alldataloaded <- alldataloaded %>%
+  group_by(trial) %>%
+  mutate(
+    # Find distance at maximum x in the trial
+    distance_at_max_x = distance[which.max(x)]
+  )
+```
+
+## Data frames
+
+```{r}
+#separate for each block/group
+alldataloaded_block_1 <- alldataloaded %>%
+  filter(block == 1)
+
+alldataloaded_block_2 <- alldataloaded %>%
+  filter(block == 2)
+
+alldataloaded_block_3 <- alldataloaded %>%
+  filter(block == 3)
+
+### 10 last and 10 first trials ###
+# Define number of trials to select
+n_training <- 10
+n_test <- 10
+
+#Block 1
+train_test_b1 <- alldataloaded_block_1 %>%
+  group_by(id, reliance, phase) %>%
+  # keep last 10 training and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, reliance, phase, trial) %>%
+  slice_tail(n = 1) %>%     # last row per trial
+  ungroup()
+
+#set level
+train_test_b1$phase <- factor(train_test_b1$phase, 
+                              levels = c("training", "test"))
+
+#Block 2
+train_test_b2 <- alldataloaded_block_2 %>%
+  group_by(id, reliance, phase) %>%
+  # keep last 10 training and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, reliance, phase, trial) %>%
+  slice_tail(n = 1) %>%     # last row per trial
+  ungroup()
+
+#set level
+train_test_b2$phase <- factor(train_test_b2$phase, 
+                              levels = c("training", "test"))
+
+#Block 3
+train_test_b3 <- alldataloaded_block_3 %>%
+  group_by(id, reliance, phase) %>%
+  # keep last 10 training and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, reliance, phase, trial) %>%
+  slice_tail(n = 1) %>%     # last row per trial
+  ungroup()
+
+#set level
+train_test_b3$phase <- factor(train_test_b3$phase, 
+                              levels = c("training", "test"))
+```
+
+Blocks 1 and 2
+
+```{r}
+#Make a dataframe with both
+train_b12_test_b12 <- rbind(alldataloaded_block_1, alldataloaded_block_2)
+
+#filter for last 10 and first 10
+train_test_b12 <- train_b12_test_b12 %>%
+  group_by(id, reliance, phase, block) %>%
+  # keep last 10 training and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, reliance, phase, trial, block) %>%
+  slice_tail(n = 1) %>%     # last row per trial
+  ungroup()
+
+train_test_b12$phase <- factor(train_test_b12$phase, 
+                              levels = c("training", "test"))
+```
+
+Blocks 1 and 3
+
+```{r}
+train_test_b13 <- bind_rows(train_test_b1, train_test_b3)
+```
+
+For smoothed plot:
+
+```{r}
+train_b12_test_b12$phase <- factor(train_b12_test_b12$phase, levels = c("training", "test"))
+
+last_train_b12_test_b12 <- train_b12_test_b12 %>%
+  group_by(id, reliance, phase, trial, block) %>%
+  slice_tail(n = 1) %>%     # last row per trial
+  ungroup()
+
+### ---- SUMMARY STATS (mean & SD per phase × trial) ---- ###
+summary_df_allb12 <- last_train_b12_test_b12 %>%
+  group_by(phase, trial) %>%    # phases: training/test
+  summarise(
+    mean_dist = mean(distance, na.rm = TRUE),
+    sd_dist   = sd(distance, na.rm = TRUE),
+    n         = sum(!is.na(distance)),
+    .groups = "drop"
+  )
+
+max_training <- summary_df_allb12 %>%
+  filter(phase == "training") %>%
+  summarise(max_trial = max(trial)) %>%
+  pull(max_trial)
+
+summary_df_allb12 <- summary_df_allb12 %>%
+  mutate(global_trial = ifelse(phase == "training",
+                               trial,
+                               trial + max_training))
+
+summary_df_allb12 <- summary_df_allb12 %>%
+  mutate(
+    mean_dist_mm = mean_dist / 2.108,
+    sd_dist_mm   = sd_dist   / 2.108
+  )
+
+summary_smoothed <- summary_df_allb12 %>%
+  group_by(phase) %>%
+  arrange(global_trial) %>%
+  mutate(
+    mean_dist_smooth = rollapply(mean_dist_mm, width = 3, mean, fill = NA),
+    sd_dist_smooth   = rollapply(sd_dist_mm,   width = 3, mean, fill = NA)
+    )
+
+
+######
+summary_stats_block_12$phase <- factor(
+  summary_stats_block_12$phase,
+  levels = c("training", "test")
+)
+summary_stats_block_12 <- summary_stats_block_12 %>%
+  mutate(
+    mean_dist_mm = mean_distance / 2.108,
+    sd_dist_mm   = sd_distance   / 2.108
+  )
+
+
+
+
+overall_summary <- summary_stats_block_12 %>%
+  group_by(phase) %>%
+  summarise(
+    overall_mean_mm = mean(mean_dist_mm, na.rm = TRUE),
+    overall_sd_mm   = sd(mean_dist_mm, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+```
+
+For speed calculations
+
+```{r}
+speed_ind <- alldataloaded %>%
+  
+  # Keep last 10 training and first 10 test trials PER participant
+  group_by(id, phase) %>%
+  filter(
+    (phase == "training" & trial >= max(trial) - (n_training - 1)) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  
+  # Now work per participant × phase × trial
+  group_by(id, phase, trial) %>%
+  
+  summarise(
+    # First and last positions
+    x_start = first(x),
+    y_start = first(y),
+    x_end   = last(x),
+    y_end   = last(y),
+    
+    # First and last times
+    t_start = first(time),
+    t_end   = last(time),
+    
+    # Distance to goal (keep column)
+    distance_goal = last(distance)/2.108,
+    
+    block = first(block),
+    
+    .groups = "drop"
+  ) %>%
+  
+  mutate(
+    # Distance in pixels
+    dist_px = sqrt((x_end - x_start)^2 + (y_end - y_start)^2),
+    
+    # Convert to mm
+    dist_mm = dist_px / 2.108,
+    
+    # Time difference (seconds)
+    time_s  = t_end - t_start,
+    
+    # Speed (mm/s)
+    speed_mm_s = dist_mm / time_s
+  )
+
+
+speed_ind
+```
+
+```{r}
+last_5cm_px <- 50 * 2.108
+
+speed_last5cm_path <- alldataloaded %>%
+  
+  filter(block %in% c(1, 2)) %>%
+  
+  group_by(id, phase) %>%
+  filter(
+    (phase == "training" & trial >= max(trial) - (n_training - 1)) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  
+  group_by(id, phase, trial, block) %>%
+  arrange(time, .by_group = TRUE) %>%
+  
+  # last 5 cm only
+  filter(distance <= last_5cm_px) %>%
+  
+  mutate(
+    dx = x - lag(x),
+    dy = y - lag(y),
+    dt = time - lag(time),
+    
+    step_px = sqrt(dx^2 + dy^2),
+    step_mm = step_px / 2.108,
+    
+    speed_mm_s = step_mm / dt
+  ) %>%
+  
+  filter(!is.na(speed_mm_s), dt > 0) %>%
+  
+  mutate(
+    path_mm = cumsum(step_mm)
+  ) %>%
+  
+  ungroup()
+
+```
+
+```{r}
+
+```
+
+## Descriptive stats for each participant
+
+Block 1
+
+```{r}
+#Block 1
+summary_stats_block_1 <- alldataloaded_block_1 %>%
+  group_by(id, phase) %>%
+  # Filter for the last 10 training trials and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, phase, trial) %>%
+  # Keep only the last row of each trial
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_distance = mean(distance, na.rm = TRUE),
+    sd_distance = sd(distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_stats_block_1
+```
+
+Block 2
+
+```{r}
+#Block 2
+summary_stats_block_2 <- alldataloaded_block_2 %>%
+  group_by(id, phase) %>%
+  # Filter for the last 10 training trials and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, phase, trial) %>%
+  # Keep only the last row of each trial
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_distance = mean(distance, na.rm = TRUE),
+    sd_distance = sd(distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_stats_block_2
+```
+
+Block 3
+
+```{r}
+#block 3
+summary_stats_block_3 <- alldataloaded_block_3 %>%
+  group_by(id, phase) %>%
+  # Filter for the last 10 training trials and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, phase, trial) %>%
+  # Keep only the last row of each trial
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_distance = mean(distance, na.rm = TRUE),
+    sd_distance = sd(distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_stats_block_3
+```
+
+Blocks 1 and 2
+
+```{r}
+summary_stats_block_12 <- train_b12_test_b12 %>%
+  group_by(id, phase, block) %>%
+  # Filter for the last 10 training trials and first 10 test trials
+  filter(
+    (phase == "training" & trial > max(trial) - n_training) |
+    (phase == "test" & trial <= n_test)
+  ) %>%
+  group_by(id, phase, trial, block) %>%
+  # Keep only the last row of each trial
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  group_by(id, phase, block) %>%
+  summarise(
+    mean_distance = mean(distance, na.rm = TRUE),
+    sd_distance = sd(distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_stats_block_12
+
+```
+
+### Increasing?
+
+```{r}
+#How many are increasing in means between training and test
+wide_means <- summary_stats_block_12 %>%
+  select(id, phase, mean_dist_mm) %>%
+  pivot_wider(
+    names_from = phase,
+    values_from = mean_dist_mm
+  )
+
+num_increased <- wide_means %>%
+  filter(test > training) %>%
+  nrow()
+
+total_participants <- nrow(wide_means)
+
+cat("Participants with an increase:", num_increased,
+    "out of", total_participants, "\n")
+```
+
+### Phase means
+
+```{r}
+#Blocks 1&2
+phase_means <- summary_stats_block_12 %>%
+  group_by(phase, block) %>%
+  summarise(
+    grand_mean = mean(mean_distance, na.rm = TRUE),
+    grand_sd   = sd(mean_distance, na.rm = TRUE),
+    n = n(),
+    se = grand_sd / sqrt(n),
+    .groups = "drop"
+  )
+
+phase_means
+
+#Block 3
+phase_means_overall <- summary_stats_block_3 %>%
+  group_by(phase) %>%
+  summarise(
+    grand_mean = mean(mean_distance, na.rm = TRUE),
+    grand_sd   = sd(mean_distance, na.rm = TRUE),
+    n = n(),
+    se = grand_sd / sqrt(n),
+    .groups = "drop"
+  )
+
+phase_means_overall
+```
+
+## Linear Mixed Model
+
+Blocks 1&2 interaction between training and test
+
+```{r}
+#blocks 1&2
+m_simple <- lmer(
+  distance ~ phase + (1 + phase | id),
+  data = train_test_b12
+)
+summary(m_simple)
+```
+
+Block 1
+
+```{r}
+m_b1 <- lmer(
+  distance ~ phase + (1 + phase | id),
+  data = train_test_b1
+)
+summary(m_b1)
+```
+
+Block 2
+
+```{r}
+m_b2 <- lmer(
+  distance ~ phase + (1 + phase | id),
+  data = train_test_b2
+)
+summary(m_b2)
+```
+
+Test x block interaction: blocks 1 and 2
+
+```{r}
+m_block <- lmer(
+  distance ~ phase * block + (1 + phase | id),
+  data = train_test_b12
+)
+summary(m_block)
+```
+
+Test phase of groups 1 nd 2
+
+```{r}
+emmeans(m_block, ~ block | phase, at = list(phase = "test"))
+
+lmer(distance ~ block + (1 | id), data = subset(train_test_b12, phase == "test"))
+pairs(emmeans(m_block, ~ block | phase))
+
+```
+
+Block 3
+
+```{r}
+m_b3 <- lmer(
+  distance ~ phase + (1 + phase | id),
+  data = train_test_b3
+)
+summary(m_b3)
+```
+
+Blocks 1 & 3
+
+```{r}
+m_b13 <- lmer(
+  distance ~ phase * block + (1 | id),
+  data = train_test_b13
+)
+
+summary(m_b13)
+```
+
+```{r}
+pairs(emmeans(m_b13, ~ block | phase))
+```
+
+```{r}
+plot(m_simple, which = 1)
+
+plot(m_simple, which = 2)
+
+boxplot(distance ~ phase,   data = train_test_b12)
+
+(colour_plot <- ggplot(train_test_b12, aes(x = trial, y = distance, colour = id)) +
+  geom_point(size = 2) +
+  theme_classic() +
+  theme(legend.position = "none"))
+
+#Note that trials 1-10 are test and trials 21-30 are training -> not in the correct order
+(split_plot <- ggplot(aes(trial, distance), data = train_test_b12) + 
+  geom_point() + 
+  facet_wrap(~ id) + # create a facet for each mountain range
+  xlab("trial") + 
+  ylab("distance"))
+
+
+```
+
+## Speed and accuracy
+
+Mean and SD for each participant
+
+```{r}
+speed_summary <- speed_ind %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_speed = mean(speed_mm_s, na.rm = TRUE),
+    SD_speed = sd(speed_mm_s, na.rm = TRUE),
+    
+    mean_dist_goal  = mean(distance_goal, na.rm = TRUE),
+    
+    .groups = "drop"
+  )
+
+
+speed_summary
+
+```
+
+Speed for groups 1 and 2
+
+```{r}
+speed_summary_b12 <- speed_ind %>%
+  filter(block == 1 | block == 2) %>%
+  group_by(id, phase, block) %>%
+  summarise(
+    mean_speed = mean(speed_mm_s, na.rm = TRUE),
+    SD_speed = sd(speed_mm_s, na.rm = TRUE),
+    
+    mean_dist_goal  = mean(distance_goal, na.rm = TRUE),
+    
+    .groups = "drop"
+  )
+speed_summary_b12
+```
+
+Speed for group 1
+
+```{r}
+speed_summary_b1 <- speed_ind %>%
+  filter(block == 1) %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_speed = mean(speed_mm_s, na.rm = TRUE),
+    SD_speed = sd(speed_mm_s, na.rm = TRUE),
+    
+    mean_dist_goal  = mean(distance_goal, na.rm = TRUE),
+    
+    .groups = "drop"
+  )
+
+speed_summary_b1
+
+# Reshape to wide format: one row per participant, separate columns for training & test
+speed_summary_b1_wide <- speed_summary_b1 %>%
+  tidyr::pivot_wider(
+    names_from = phase,
+    values_from = c(mean_speed, SD_speed, mean_dist_goal),
+    names_sep = "_"
+  )
+
+# Rank participants based on test phase performance (lowest distance = best) and add difference between training and test
+speed_summary_b1_ranked <- speed_summary_b1_wide %>%
+  arrange(mean_dist_goal_test) %>%
+  mutate(
+    diff_speed = mean_speed_training - mean_speed_test,
+    rank_test = row_number()
+    )
+
+speed_summary_b1_ranked
+
+```
+
+Speed for group 2
+
+```{r}
+speed_summary_b2 <- speed_ind %>%
+  filter(block == 2) %>%
+  group_by(id, phase) %>%
+  summarise(
+    mean_speed = mean(speed_mm_s, na.rm = TRUE),
+    SD_speed = sd(speed_mm_s, na.rm = TRUE),
+    
+    mean_dist_goal  = mean(distance_goal, na.rm = TRUE),
+    
+    .groups = "drop"
+  )
+
+speed_summary_b2
+
+
+
+# Reshape to wide format: one row per participant, separate columns for training & test
+speed_summary_b2_wide <- speed_summary_b2 %>%
+  tidyr::pivot_wider(
+    names_from = phase,
+    values_from = c(mean_speed, SD_speed, mean_dist_goal),
+    names_sep = "_"
+  )
+
+
+
+# Rank participants based on test phase performance (lowest distance = best) and add difference between training and test
+speed_summary_b2_ranked <- speed_summary_b2_wide %>%
+  arrange(mean_dist_goal_test) %>%
+  mutate(
+    diff_speed = mean_speed_training - mean_speed_test,
+    rank_test = row_number()
+    )
+
+speed_summary_b2_ranked
+
+
+
+```
+
+```{r}
+# Filter for test phase only
+speed_test <- speed_ind %>%
+  filter(phase == "test",
+         block == 1)
+
+# Plot: speed per trial
+ggplot(speed_test, aes(x = trial, y = speed_mm_s, color = as.factor(id))) +
+  geom_point(size = 2) +             # points for each trial
+  geom_line(aes(group = id), alpha = 0.5) +  # optional: connect trials for each participant
+  scale_x_continuous(breaks = sort(unique(speed_test$trial))) +
+  labs(
+    title = "Group 1: Speed in Trial During Test Phase",
+    x = "Trial",
+    y = "Speed (mm/s)",
+    color = "Participant"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+```{r}
+speed_accuracy 
+```
+
+LLM
+
+```{r}
+speed_ind_b12 <- speed_ind %>%
+  mutate(
+    phase = factor(phase, levels = c("training", "test"))
+  ) %>%
+  filter(block %in% c(1, 2))
+
+m_speed_12 <- lmer(
+  speed_mm_s ~ phase * distance_goal + (1 + phase | id),
+  data = speed_ind_b12
+)
+summary(m_speed_12)
+
+
+correlation <- cor(speed_summary_b12$mean_dist_goal, speed_summary_b12$mean_speed, method = 'pearson')
+correlation
+
+partR2(
+  m_speed_12,
+  partvars = "phase:distance_goal",
+  data = model.frame(m_speed_12),
+  nboot = 1000
+)
+```
+
+```{r}
+m_speed_1 <- lmer(
+  speed_mm_s ~ phase * distance_goal + (1 + phase | id),
+  data = speed_ind_b1
+)
+summary(m_speed_1)
+```
+
+```{r}
+speed_ind_b1 <- speed_ind %>%
+  mutate(
+    phase = factor(phase, levels = c("training", "test"))
+  ) %>%
+  filter(block == 1)
+
+
+```
+
+```{r}
+m_speed_1 <- lmer(
+  speed_mm_s ~ phase * distance_goal + (1 + phase | id),
+  data = speed_ind_b1
+)
+summary(m_speed_1)
+
+```
+
+```{r}
+m_speed_test_only <- lmer(
+  speed_mm_s ~ distance_goal + (1 | id),
+  data = speed_ind_b2 %>% filter(phase == "test")
+)
+
+summary(m_speed_test_only)
+```
+
+Block 2
+
+```{r}
+speed_ind_b2 <- speed_ind %>%
+  mutate(
+    phase = factor(phase, levels = c("training", "test"))
+  ) %>%
+  filter(block == 2)
+```
+
+```{r}
+m_speed_2 <- lmer(
+  speed_mm_s ~ phase * distance_goal + (1 + phase | id),
+  data = speed_ind_b2
+)
+summary(m_speed_2)
+
+```
+
+PLOT
+
+plot in speed from training to test in blocks 1 and a separate for block 2
+
+(also a scatter plot distance to goal vs mean speed in testing)
+
+```{r}
+ggplot(speed_summary_b1,
+       aes(x = phase,
+           y = mean_speed,
+           group = id,
+           color = id)) +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(aes(color = id), alpha = 0.7, linewidth = 0.7) +
+  geom_point(aes(color = id), size = 2, alpha = 0.5) +
+
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    aes(ymin = mean_speed - SD_speed,
+        ymax = mean_speed + SD_speed),
+    width = 0.06,
+    alpha = 0.25
+  ) +
+
+
+  # ---- CLEANER LABELS ----
+  labs(
+    subtitle = "Group 1: Individual Accuracy in Training and Test Phases",
+    x = "",
+    y = "Speed (mm/s)",
+    color = "Participant"
+  ) +
+  
+  scale_x_discrete(labels = c(
+    "training" = "Training",
+    "test" = "Test"
+  )) +
+
+  # ---- IMPROVED THEME ----
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  ) 
+
+ggsave(
+  "speed_g1_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+ggplot(speed_summary_b2,
+       aes(x = phase,
+           y = mean_speed,
+           group = id,
+           color = id)) +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(aes(color = id), alpha = 0.7, linewidth = 0.7) +
+  geom_point(aes(color = id), size = 2, alpha = 0.5) +
+
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    aes(ymin = mean_speed - SD_speed,
+        ymax = mean_speed + SD_speed),
+    width = 0.06,
+    alpha = 0.25
+  ) +
+
+
+  # ---- CLEANER LABELS ----
+  labs(
+    subtitle = "Group 2: Speed in Training and test phase",
+    x = "",
+    y = "Speed (mm/s)",
+    color = "Participant"
+  ) +
+  
+  scale_x_discrete(labels = c(
+    "training" = "Training",
+    "test" = "Test"
+  )) +
+
+  # ---- IMPROVED THEME ----
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  ) 
+
+ggsave(
+  "speed_g2_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+speed_overall_b12 <- speed_summary_b12 %>%
+  group_by(phase) %>%
+  summarise(
+    overall_mean_mm = mean(mean_speed, na.rm = TRUE),
+    overall_sd_mm   = sd(mean_speed, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+ggplot(speed_summary_b12,
+       aes(x = phase,
+           y = mean_speed,
+           group = id,
+           color = id)) +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(aes(color = id), alpha = 0.7, linewidth = 0.7) +
+  geom_point(aes(color = id), size = 2, alpha = 0.5) +
+
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    aes(ymin = mean_speed - SD_speed,
+        ymax = mean_speed + SD_speed),
+    width = 0.06,
+    alpha = 0.25
+  ) +
+  
+  # ---- OVERALL MEANS ----
+  geom_line(
+    data = speed_overall_b12,
+    aes(x = phase, y = overall_mean_mm, group = 1),
+    color = "black",
+    linewidth = 0.8
+  ) + 
+  geom_point(
+    data = speed_overall_b12,
+    aes(x = phase, y = overall_mean_mm, group = 1),
+    color = "black",
+    size = 2.5,
+    shape = 21,
+    fill = "white",
+    stroke = 1.0
+  ) +
+  geom_errorbar(
+    data = speed_overall_b12,
+    aes(
+      x = phase,
+      ymin = overall_mean_mm - overall_sd_mm,
+      ymax = overall_mean_mm + overall_sd_mm,
+      group = 1
+    ),
+    color = "black",
+    width = 0.1,
+    linewidth = 0.62
+  ) + 
+
+
+  # ---- CLEANER LABELS ----
+  labs(
+    subtitle = "Groups 1 and 2: Speed in training and test phase",
+    x = "",
+    y = "Speed (mm/s)",
+    color = "Participant"
+  ) +
+  
+  scale_x_discrete(labels = c(
+    "training" = "Training",
+    "test" = "Test"
+  )) +
+
+  # ---- IMPROVED THEME ----
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+ggsave(
+  "speed_g12_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+# ---- OVERALL SUMMARY ----
+speed_overall_b12 <- speed_summary_b12 %>%
+  group_by(phase) %>%
+  summarise(
+    overall_mean_mm = mean(mean_speed, na.rm = TRUE),
+    overall_sd_mm   = sd(mean_speed, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---- PLOT ----
+ggplot() +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(
+    data = speed_summary_b12,
+    aes(
+      x = phase,
+      y = mean_speed,
+      group = id,
+      color = id
+    ),
+    alpha = 0.7,
+    linewidth = 0.7
+  ) +
+
+  geom_point(
+    data = speed_summary_b12,
+    aes(
+      x = phase,
+      y = mean_speed,
+      color = id
+    ),
+    size = 2,
+    alpha = 0.5
+  ) +
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    data = speed_summary_b12,
+    aes(
+      x = phase,
+      ymin = mean_speed - SD_speed,
+      ymax = mean_speed + SD_speed,
+      group = id
+    ),
+    width = 0.06,
+    alpha = 0.25
+  ) +
+
+  # ---- OVERALL MEAN (BLACK + LEGEND ENTRY) ----
+  geom_line(
+    data = speed_overall_b12,
+    aes(
+      x = phase,
+      y = overall_mean_mm,
+      color = "Overall mean",
+      group = 1
+    ),
+    linewidth = 0.9
+  ) +
+
+  geom_point(
+    data = speed_overall_b12,
+    aes(
+      x = phase,
+      y = overall_mean_mm,
+      color = "Overall mean"
+    ),
+    size = 2.8,
+    shape = 21,
+    fill = "white",
+    stroke = 1.0
+  ) +
+
+  geom_errorbar(
+    data = speed_overall_b12,
+    aes(
+      x = phase,
+      ymin = overall_mean_mm - overall_sd_mm,
+      ymax = overall_mean_mm + overall_sd_mm,
+      color = "Overall mean"
+    ),
+    width = 0.1,
+    linewidth = 0.6
+  ) +
+
+  # ---- COLOR SCALE & LEGEND ----
+  scale_color_manual(
+    name = "Indicator",
+    values = c("Overall mean" = "black"),
+    guide = guide_legend(
+      override.aes = list(alpha = 1)
+    )
+  ) +
+
+  # ---- LABELS ----
+  labs(
+    subtitle = "Groups 1 and 2: Speed in training and test phase",
+    x = "",
+    y = "Speed (mm/s)"
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "training" = "Training",
+      "test" = "Test"
+    )
+  ) +
+
+  # ---- THEME ----
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9),
+    legend.key.size = unit(0.6, "lines"),
+    axis.text.x = element_text(size = 14, face = "bold")
+  )
+ggsave(
+  "speed_g12_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+speed_summary_b12 %>%
+  filter(phase == "test") %>%
+  ggplot(aes(
+    x = mean_dist_goal,
+    y = mean_speed
+  )) +
+  geom_point(size = 2) +
+  labs(
+    x = "Mean Distance to Goal (mm)",
+    y = "Mean Speed (mm/s)",
+    colour = "Group",
+    title = "Mean Speed vs Mean Distance to Goal (Test Phase)"
+  ) +
+  theme_minimal()
+
+ggsave(
+  "speed_dist_correlation_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+compare top halve and bottom half
+
+top fuve over colour, bottom 5 other colour
+
+Moment by moment:
+
+```{r}
+ggplot(speed_last5cm_path,
+       aes(x = path_mm, y = speed_mm_s, group = trial)) +
+  geom_line(alpha = 0.2) +
+  labs(
+    x = "Distance Travelled in Final 5 cm (mm)",
+    y = "Instantaneous Speed (mm/s)"
+  ) +
+  facet_wrap(~ phase)
+
+one_subj <- speed_last5cm_path %>%
+  filter(
+    id == "004",
+    phase == "test"
+  )
+
+ggplot(one_subj, aes(x = path_mm, y = speed_mm_s)) +
+  
+  # Individual trials (thin, transparent)
+  geom_line(
+    aes(group = trial),
+    alpha = 0.3,
+    colour = "grey40"
+  ) +
+  
+  # Mean speed profile across trials
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    linewidth = 1.2,
+    colour = "blue"
+  ) +
+  
+  labs(
+    title = "Moment-by-Moment Speed in Final 5 cm",
+    subtitle = "Participant 001 – First 10 Training Trials",
+    x = "Distance Travelled in Final 5 cm (mm)",
+    y = "Instantaneous Speed (mm/s)"
+  ) +
+  
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(
+  speed_last5cm_path %>% filter(id == "001"),
+  aes(x = path_mm, y = speed_mm_s, colour = phase)
+) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1.2) +
+  scale_x_reverse() +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(
+  speed_last5cm_path %>% filter(phase == "test", id != "007"),
+  aes(x = path_mm, y = speed_mm_s)
+) +
+  
+  # Individual trials
+  geom_line(
+    aes(group = trial),
+    alpha = 0.3,
+    colour = "grey40"
+  ) +
+  
+  # Mean per participant
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    linewidth = 0.8,
+    colour = "blue"
+  ) +
+  
+  facet_wrap(~ id) +
+  
+  labs(
+    title = "Moment-by-Moment Speed in Final 5 cm",
+    subtitle = "First 10 Test Trials – One Panel per Participant",
+    x = "Distance Travelled in Final 5 cm (mm)",
+    y = "Instantaneous Speed (mm/s)"
+  ) +
+  
+  theme_minimal()
+
+ggsave(
+  "speed_final5cm_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+ggplot(
+  speed_last5cm_path %>% filter(phase == "training", id != "007"),
+  aes(x = path_mm, y = speed_mm_s)
+) +
+  
+  # Individual trials
+  geom_line(
+    aes(group = trial),
+    alpha = 0.3,
+    colour = "grey40"
+  ) +
+  
+  # Mean per participant
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    linewidth = 0.8,
+    colour = "blue"
+  ) +
+  
+  facet_wrap(~ id) +
+  
+  labs(
+    title = "Moment-by-Moment Speed in Final 5 cm",
+    subtitle = "First 10 Test Trials – One Panel per Participant",
+    x = "Distance Travelled in Final 5 cm (mm)",
+    y = "Instantaneous Speed (mm/s)"
+  ) +
+  
+  theme_minimal()
+
+ggsave(
+  "speed_final5cm_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+## Self-report
+
+```{r}
+reliance_b12 <- train_test_b12 %>%
+  distinct(id, reliance) %>%     # one row per participant
+  count(reliance)
+
+reliance_b12
+```
+
+```{r}
+reliance_b1 <- train_test_b1 %>%
+  distinct(id, reliance) %>%     # one row per participant
+  count(reliance)
+
+reliance_b1
+
+congruent_re_b1 <- train_test_b1 %>%
+  filter(reliance == "A")
+
+congruent_re_b2 <- train_test_b2 %>%
+  filter(reliance == "P")
+
+congruent_reliance <- rbind(congruent_re_b1, congruent_re_b2)
+
+congruent_reliance <- congruent_reliance %>%
+  mutate(reliance_con = "con")
+
+incongruent_re_b1 <- train_test_b1 %>%
+  filter(reliance == "P")
+incongruent_re_b2 <- train_test_b2 %>%
+  filter(reliance %in% c("A", "A, P"))
+
+incongruent_reliance <- rbind(incongruent_re_b1, incongruent_re_b2)
+incongruent_reliance <- incongruent_reliance %>%
+  mutate(reliance_con = "incon")
+
+con_incon_groups12 <- rbind(congruent_reliance, incongruent_reliance) %>%
+  mutate(
+    phase = factor(phase, levels = c("training", "test")),
+    reliance_con = factor(reliance_con, levels = c("incon", "con"))
+  )
+
+
+lmm_reliance <- lmer(
+  distance ~ phase * reliance_con + (1 + phase | id),
+  data = con_incon_groups12
+)
+summary(lmm_reliance)
+
+####### Using this one 
+lmm_reliance_v2 <- lmer(
+  distance ~ phase * reliance_con + (1 | id), 
+  data = con_incon_groups12
+  )
+
+summary(lmm_reliance_v2)
+
+library(emmeans)
+library(effectsize)
+
+emm_phase <- emmeans(lmm_reliance_v2, ~ phase)
+
+eff_size(
+  emm_phase,
+  sigma = sigma(lmm_reliance_v2),
+  edf = df.residual(lmm_reliance_v2)
+)
+
+
+cohens_d(lmm_reliance_v2)
+
+emm <- emmeans(lmm_reliance, ~ phase | reliance_con)
+
+contrast(emm, method = "revpairwise")
+
+```
+
+```{r}
+emm <- emmeans(lmm_reliance_v2, ~ phase | reliance_con)
+
+plot(emm, comparisons = TRUE) + 
+  labs(y = "Estimated distance")
+```
+
+Box plot:
+
+```{r}
+# Calculate mean and standard error for each phase and condition
+summary_con_incon <- con_incon_groups12 %>%
+  group_by(phase, reliance_con) %>%
+  summarise(
+    mean_distance_mm = mean(distance, na.rm = TRUE)/2.108,
+    se_distance_mm = sd(distance, na.rm = TRUE) / sqrt(n()) /2.108
+  )
+
+# Create boxplot with error bars
+ggplot(summary_con_incon, aes(x = reliance_con, y = mean_distance_mm, fill = phase)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(ymin = mean_distance_mm - se_distance_mm, ymax = mean_distance_mm + se_distance_mm), width = 0.2, position = position_dodge(width = 0.8)) +
+  labs(x = "Reliance", y = "Average Distance (mm)", fill = "Phase") +
+  theme_minimal()
+
+ggsave(
+  "boxplot_reliance.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+Box plot version 2:
+
+```{r}
+
+
+ggplot(summary_con_incon, aes(x = reliance_con, y = mean_distance_mm, fill = phase)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_errorbar(
+    aes(ymin = mean_distance_mm - se_distance_mm, 
+        ymax = mean_distance_mm + se_distance_mm), 
+    width = 0.2, 
+    position = position_dodge(width = 0.8)
+  ) +
+  # 1. Custom Labels for X-axis
+  scale_x_discrete(labels = c("con" = "Congruent", "incon" = "Incongruent")) +
+  
+  # 2. Custom Colors and Legend Labels
+  scale_fill_manual(
+    values = c("training" = "lightgrey", "test" = "darkgrey"), 
+    labels = c("Training", "Test")
+  ) +
+  
+  # 3. Significance Interaction Indicator
+  # Adjust 'y' to be just above your highest error bar in the Congruent group
+  annotate("segment", x = 0.8, xend = 1.2, y = 50, yend = 50, colour = "black", linewidth = 0.6) +
+  annotate("segment", x = 0.8, xend = 0.8, y = 49.5, yend = 50, colour = "black") +
+  annotate("segment", x = 1.2, xend = 1.2, y = 49.5, yend = 50, colour = "black") +
+  annotate("text", x = 1, y = 50.5, label = "*", size = 8) +
+  
+  labs(x = "Reliance", y = "Mean Distance to Goal (mm)", fill = "Phase", title = "Mean distance in training and test phases with self-reported reliance") +
+  theme_minimal()
+
+ggsave(
+  "boxplot_reliance.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+block1_A_ids <- train_test_b12 %>%
+  filter(block == 1) %>%                 # tested on A only
+  distinct(id, reliance) %>%
+  filter(reliance == "A") %>%
+  pull(id)
+
+acc_train_test <- train_test_b12 %>%
+  filter(id %in% block1_A_ids) %>%
+  group_by(id, phase) %>%
+  summarise(mean_acc = mean(distance, na.rm = TRUE),
+            .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = phase,
+    values_from = mean_acc
+  ) %>%
+  mutate(delta_acc = training - test)
+
+acc_train_test %>%
+  mutate(direction = ifelse(delta_acc > 0, "Increase in accuracy", "Decrease in accuracy")) %>%
+  count(direction)
+```
+
+```{r}
+ggplot(acc_train_test, aes(x = "", y = delta_acc)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.05, alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Block 1 – A-reliant participants",
+    y = "Accuracy change (Test − Training)"
+  )
+```
+
+```{r}
+block2_P_ids <- train_test_b12 %>%
+  filter(block == 2) %>%                 # tested on A only
+  distinct(id, reliance) %>%
+  filter(reliance == "P", reliance == "A,P") %>%
+  pull(id)
+
+acc_train_test_b2 <- train_test_b12 %>%
+  filter(id %in% block2_P_ids) %>%
+  group_by(id, phase) %>%
+  summarise(mean_acc = mean(distance, na.rm = TRUE),
+            .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = phase,
+    values_from = mean_acc
+  ) %>%
+  mutate(delta_acc = training - test)
+
+acc_train_test_b2 %>%
+  mutate(direction = ifelse(delta_acc > 0, "Increase in accuracy", "Decrease in accuracy")) %>%
+  count(direction)
+```
+
+Self report x chosen reliance x speed diff
+
+```{r}
+
+```
+
+```{r}
+lmm_reliance_speed <- lmer(
+  speed_mm_s ~ phase * reliance_con + (1 | id), 
+  data = con_incon_groups12
+  )
+
+summary(lmm_reliance_v2)
+```
+
+## Plots
+
+Average distance to goal
+
+```{r}
+max_training <- 30
+max_test <- 15
+
+ggplot(summary_smoothed,
+       aes(x = global_trial, y = mean_dist_smooth, color = phase, fill = phase)) +
+  
+  geom_line(size = 1) +
+  
+  geom_ribbon(aes(ymin = mean_dist_smooth - sd_dist_smooth,
+                ymax = mean_dist_smooth + sd_dist_smooth),
+            alpha = 0.2, color = NA) +
+  
+  geom_vline(xintercept = max_training + 0.5,
+             linetype = "dotted", size = 1) +
+  
+  scale_x_continuous(
+    breaks = c(seq(5, max_training, by = 5), max_training + seq(5, max_test, by = 5)),
+    labels = c(seq(5, max_training, by = 5), seq(5, max_test, by = 5))
+  ) +
+  
+  labs(
+    title = "Distance to Goal Across Training and Test Trials",
+    x = "Trial Number (Training 1–30, Test 1–15)",
+    y = "Mean Distance to Goal ± SD (mm)"
+  ) +
+  
+  theme_minimal(base_size = 14)
+
+ggsave(
+  "fig2_dist_goal.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+Individual means:
+
+```{r}
+ggplot(summary_stats_block_12,
+       aes(x = phase,
+           y = mean_dist_mm,
+           group = id,
+           color = as.factor(block))) +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(aes(color = as.factor(block)), alpha = 0.25, linewidth = 0.7) +
+  geom_point(aes(color = as.factor(block)), size = 2, alpha = 0.5) +
+
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    aes(ymin = mean_dist_mm - sd_dist_mm,
+        ymax = mean_dist_mm + sd_dist_mm),
+    width = 0.06,
+    alpha = 0.25
+  ) +
+
+  # ---- OVERALL MEANS ----
+  geom_line(
+    data = overall_summary,
+    aes(x = phase, y = overall_mean_mm, color = "Overall Mean", group = 1),
+    inherit.aes = FALSE,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    data = overall_summary,
+    aes(x = phase, y = overall_mean_mm, color = "Overall Mean", group = 1),
+    inherit.aes = FALSE,
+    size = 2.5,
+    shape = 21,
+    fill = "white",
+    stroke = 1.0
+  ) +
+  geom_errorbar(
+    data = overall_summary,
+    aes(
+      x = phase,
+      ymin = overall_mean_mm - overall_sd_mm,
+      ymax = overall_mean_mm + overall_sd_mm,
+      color = "Overall Mean",
+      group = 1
+    ),
+    inherit.aes = FALSE,
+    width = 0.1,
+    linewidth = 0.62
+  ) +
+
+  
+  # ---- COLOR SCALE WITH NEW LEGEND ENTRY ----
+  scale_color_manual(
+    name = "Indicator",
+    values = c(
+      "1" = "#D55E00",
+      "2" = "#0072B2",
+      "Overall Mean" = "black"
+    ),
+    labels = c(
+      "1" = "Group 1",
+      "2" = "Group 2",
+      "Overall Mean" = "Overall mean"
+    )
+  ) +
+
+  # ---- CLEANER LABELS ----
+  labs(
+    subtitle = "Individual Accuracy in Training and Test Phases",
+    x = "",
+    y = "Mean Distance to Goal (mm)",
+    color = "Block"
+  ) +
+  
+  scale_x_discrete(labels = c(
+    "training" = "Training",
+    "test" = "Test"
+  )) +
+
+  # ---- IMPROVED THEME ----
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  ) 
+
+ggsave(
+  "accuracy_plot.png",
+  width = 7,
+  height = 5,
+  dpi = 300,
+  device = ragg::agg_png
+)
+```
+
+```{r}
+
+
+ggplot(summary_stats_block_12,
+       aes(x = phase,
+           y = mean_dist_mm,
+           group = id,
+           color = as.factor(block))) +
+
+  # ---- PARTICIPANT LINES ----
+  geom_line(aes(color = as.factor(block)), alpha = 0.5, linewidth = 1) +
+  geom_point(aes(color = as.factor(block)), size = 3, alpha = 0.6) +
+
+  # ---- SMOOTHING ----
+  geom_smooth(aes(color = as.factor(block)), method = "loess", se = FALSE, span = 0.2, linewidth = 1.5) +
+
+  # ---- PARTICIPANT ERROR BARS ----
+  geom_errorbar(
+    aes(ymin = mean_dist_mm - sd_dist_mm,
+        ymax = mean_dist_mm + sd_dist_mm),
+    width = 0.06,
+    alpha = 0.5
+  ) +
+
+  # ---- OVERALL MEANS ----
+  geom_line(
+    data = overall_summary,
+    aes(x = phase, y = overall_mean_mm, color = "Overall Mean", group = 1),
+    inherit.aes = FALSE,
+    linewidth = 1.5
+  ) +
+  geom_point(
+    data = overall_summary,
+    aes(x = phase, y = overall_mean_mm, color = "Overall Mean", group = 1),
+    inherit.aes = FALSE,
+    size = 4,
+    shape = 21,
+    fill = "white",
+    stroke = 1.5
+  ) +
+  geom_errorbar(
+    data = overall_summary,
+    aes(
+      x = phase,
+      ymin = overall_mean_mm - overall_sd_mm,
+      ymax = overall_mean_mm + overall_sd_mm,
+      color = "Overall Mean",
+      group = 1
+    ),
+    inherit.aes = FALSE,
+    width = 0.1,
+    linewidth = 1
+  ) +
+
+  # ---- COLOR SCALE WITH NEW LEGEND ENTRY ----
+  scale_color_manual(
+    name = "Indicator",
+    values = c(
+      "1" = "#D55E00",
+      "2" = "#0072B2",
+      "Overall Mean" = "black"
+    ),
+    labels = c(
+      "1" = "Block 1",
+      "2" = "Block 2",
+      "Overall Mean" = "Overall mean"
+    )
+  ) +
+
+  # ---- CLEANER LABELS ----
+  labs(
+    subtitle = "Individual Accuracy in Training and Test Phases",
+    x = "",
+    y = "Mean Distance (mm)",
+    color = "Block"
+  ) +
+  
+  scale_x_discrete(labels = c(
+    "training" = "Training",
+    "test" = "Test"
+  )) +
+
+  # ---- IMPROVED THEME ----
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+```
