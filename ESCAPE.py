@@ -511,8 +511,6 @@ def run_test_block(n_trials, win, mouse, target_x, sound_files, block_num, condi
 
 
 
-
-
 def generate_mixed_conditions(n_trials):
     trials = []
 
