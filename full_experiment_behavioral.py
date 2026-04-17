@@ -39,7 +39,6 @@ win = visual.Window(
 )
 
 
-
 all_trials_data = []   # stores data from ALL training + test trials
 
 
@@ -265,7 +264,9 @@ def run_trial(win, mouse, target_x, sound_files, block, phase, condition, play_s
     error = ((final_x - target_x)**2 + (final_y - target_y)**2)**0.5
 
     hit = error <= 37   # keep or adjust tolerance
-
+    
+    stop = False
+    
     # If escape was pressed, return partial data immediately without feedback
     if escaped:
         df = pd.DataFrame({
@@ -274,7 +275,7 @@ def run_trial(win, mouse, target_x, sound_files, block, phase, condition, play_s
             'y': y_data,
             'offset_pos': offset_no
         })
-        return error, hit, df, True   # True = escaped
+        return error, hit, df, True, stop   # True = escaped
 
 
     if phase == "training":
@@ -288,7 +289,7 @@ def run_trial(win, mouse, target_x, sound_files, block, phase, condition, play_s
         ## for behavioural
         history.append(hit)
 
-        stop = len(history) == 10 and sum(history >=7)
+        stop = len(history) == 3 and sum(history) >=2
 
     df = pd.DataFrame({
         'time': t_data,
@@ -616,12 +617,6 @@ full_df.to_csv(filename, index=False)
 
 print(f"Saved all data to {filename}")
 
-# Close port
-if port_type == 'serial' and port is not None:
-    try:
-        port.close()
-    except Exception:
-        pass
 
 win.close()
 core.quit()
