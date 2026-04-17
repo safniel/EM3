@@ -3,7 +3,6 @@ psychopy.useVersion('2023.1.3')
 import pandas as pd
 import os, random
 from psychopy import sound, visual, core, event, gui
-from collections import deque
 import serial
 
 # ### EEG ###
