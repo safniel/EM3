@@ -7,7 +7,7 @@ from collections import deque
 import serial
 
 # ### EEG ###
-port = serial.Serial("COM3", 115200)  # address for serial port is COM4 in this example. Change to match your machine.
+port = serial.Serial("COM3", 115200)  # address for serial port is COM3 in this example. Change to match your machine.
 
 def trigger(code):
     port.write(code.to_bytes(1, 'big'))
