@@ -6,32 +6,37 @@ from psychopy import sound, visual, core, event, gui
 from collections import deque
 import serial
 
-### EEG ###
-# Try serial port first, then parallel port, then fall back to print-only.
-# Change "COM4" and 0x0378 to match your lab setup.
-try:
-    port = serial.Serial("COM4", 115200)
-    port_type = 'serial'
-except Exception:
-    try:
-        from psychopy import parallel
-        port = parallel.ParallelPort(0x0378)
-        port_type = 'parallel'
-    except Exception:
-        port = None
-        port_type = 'none'
+# ### EEG ###
+# # Try serial port first, then parallel port, then fall back to print-only.
+# # Change "COM4" and 0x0378 to match your lab setup.
+# try:
+#     port = serial.Serial("COM4", 115200)
+#     port_type = 'serial'
+# except Exception:
+#     try:
+#         from psychopy import parallel
+#         port = parallel.ParallelPort(0x0378)
+#         port_type = 'parallel'
+#     except Exception:
+#         port = None
+#         port_type = 'none'
 
-print(f'EEG port type: {port_type}')
+# print(f'EEG port type: {port_type}')
+
+# def trigger(code):
+#     """Send an EEG trigger code and immediately reset to 0."""
+#     if port_type == 'serial':
+#         port.write(code.to_bytes(1, 'big'))
+#     elif port_type == 'parallel':
+#         port.setData(code)
+#         core.wait(0.020)   # 20 ms pulse width
+#         port.setData(0)
+#     print(f'Trigger sent: {code}')
+port = serial.Serial("COM4", 115200)  # address for serial port is COM4 in this example. Change to match your machine.
 
 def trigger(code):
-    """Send an EEG trigger code and immediately reset to 0."""
-    if port_type == 'serial':
-        port.write(code.to_bytes(1, 'big'))
-    elif port_type == 'parallel':
-        port.setData(code)
-        core.wait(0.020)   # 20 ms pulse width
-        port.setData(0)
-    print(f'Trigger sent: {code}')
+    port.write(code.to_bytes(1, 'big'))
+    print('trigger sent {}'.format(code))
 
 # Trial Start
 TRIG_GO_SOUND       = 11   # go-beep plays
@@ -393,16 +398,6 @@ def run_trial(win, mouse, target_x, sound_files, block, phase, condition, play_s
         })
         return error, hit, df, True   # True = escaped
 
-    if manual_override:
-        if phase == "training":
-            error_sound_under.play()
-        df = pd.DataFrame({
-            'time': t_data,
-            'x': x_data,
-            'y': y_data,
-            'offset_pos': offset_no
-        })
-        return error, False, df, False
 
     if phase == "training":
         if hit:
@@ -459,10 +454,10 @@ def run_training_block(n_trials, win, mouse, target_x, sound_files, block_num, c
 
         show_feedback(win, error, hit)
 
-        # Early-stop criterion (checked via history updated inside run_trial)
-        if len(history) == 2 and sum(history) >= 1:
-            print("Training criterion reached. Stopping early.")
-            break
+        # # Early-stop criterion (checked via history updated inside run_trial)
+        # if len(history) == 2 and sum(history) >= 1:
+        #     print("Training criterion reached. Stopping early.")
+        #     break
 
 # TRANSITION
 def run_transition_block(n_trials, win, mouse, target_x, sound_files, block_num, condition, play_sounds):
