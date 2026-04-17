@@ -32,7 +32,7 @@ import serial
 #         core.wait(0.020)   # 20 ms pulse width
 #         port.setData(0)
 #     print(f'Trigger sent: {code}')
-port = serial.Serial("COM4", 115200)  # address for serial port is COM4 in this example. Change to match your machine.
+port = serial.Serial("COM3", 115200)  # address for serial port is COM4 in this example. Change to match your machine.
 
 def trigger(code):
     port.write(code.to_bytes(1, 'big'))
